@@ -1,5 +1,6 @@
 .venv/
 data/
+activities_3s/
 ds_driveguard_*/
 DriveGuard_Features/
 ViT_Features/
