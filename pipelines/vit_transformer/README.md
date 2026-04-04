@@ -1,0 +1,112 @@
+# Pipeline: ViT + Transformer
+
+Spatial feature extraction using **ViT-SO400M-SigLIP** (1152-dim embeddings), followed by a **Transformer encoder** temporal classifier.
+
+---
+
+## Architecture
+
+| Stage | Model | Input | Output |
+|---|---|---|---|
+| Spatial | ViT-SO400M (`vit_so400m_patch14_siglip_384`) | 384×384 ROI crops | 1152-dim feature vector |
+| Feature extraction | ViT with classifier head removed | 16-frame sequence | `(16, 1152)` .npy tensor |
+| Temporal | Transformer encoder + linear head (4 layers, 8 heads, 512 dim) | `(16, 1152)` | Safe / Drink / Phone |
+
+---
+
+## Run Order
+
+### Prerequisites
+- Preprocessing done: `ds_driveguard_temporal_roi/` exists at repo root
+- Google Drive folder: `MyDrive/DriveGuard/`
+- All notebooks run on Google Colab (GPU required)
+
+---
+
+### Step 1 — Train spatial model (`ViT_spatial_model.ipynb`)
+
+**Input:** `ds_driveguard_spatial_roi/` uploaded as zip to `MyDrive/DriveGuard/`
+
+- ViT-SO400M loaded via `timm`, 3-class classifier head
+- Phase 1: freeze backbone, train head only (`lr=1e-3`)
+- Phase 2: unfreeze deep blocks, differential LRs (`backbone=1e-6`, `head=5e-5`)
+- Augmentation: flip, color jitter, affine, Gaussian blur, MixUp (α=0.8), CutMix (α=1.0)
+- Class imbalance: `WeightedRandomSampler` + FocalLoss with label smoothing
+
+**Output:** `MyDrive/DriveGuard/models/vit_spatial_model_v1.pth`
+
+---
+
+### Step 2 — Extract features (`photo_to_tensor_transformers.ipynb`)
+
+**Input:**
+- `MyDrive/DriveGuard/models/vit_spatial_model_v1.pth`
+- `ds_driveguard_temporal_roi/` uploaded as zip to `MyDrive/DriveGuard/`
+
+- Loads trained spatial model, removes classifier head (`model.reset_classifier(0)`)
+- SigLIP normalization: mean=std=0.5, resize to 384×384
+- Per sequence: 16 frames → batch → ViT → reshape to `(16, 1152)` → save as float32 .npy
+
+> `DATASET_PATH` in the notebook must match the folder name inside the zip (`ds_driveguard_temporal_roi`), not the zip filename.
+
+**Output:** `MyDrive/DriveGuard/ViT_Features/{train,val,test}/{class}/{seq_id}.npy`
+
+---
+
+### Step 3 — Evaluate end-to-end (`evaluate_pipeline_driveguard.ipynb`)
+
+**Input:**
+- `MyDrive/DriveGuard/models/vit_spatial_model_v1.pth`
+- `MyDrive/DriveGuard/models/best_stage4_single_cam_model.pth`
+- `ds_driveguard_temporal_roi/` zip
+
+- Runs full two-stage pipeline on test set (no cached features)
+- Batch: 16 clips → 256 ViT forward passes, then temporal inference
+- AMP: bfloat16 on A100, float16 on V100
+
+**Output:** Classification report (precision/recall/F1 per class), confusion matrix PNG
+
+---
+
+### Step 4 — Run inference (`infer.py`)
+
+```bash
+python infer.py \
+    --video /path/to/video.mp4 \
+    --spatial_weights /path/to/vit_spatial_model_v1.pth \
+    --temporal_weights /path/to/best_stage4_single_cam_model.pth \
+    --output_video ./output.mp4
+```
+
+Device auto-detected: Apple Silicon MPS (FP16) → CUDA (FP16) → CPU (FP32)
+
+**Key parameters:**
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `WINDOW_FRAMES` | 16 | Temporal window size |
+| `STEP` | 6 | Frame sampling stride |
+| `CYCLE_SIZE` | 90 | ROI refresh interval |
+| `IMG_SIZE` | 384 | ViT input resolution |
+| `ROI_PADDING` | 0.08 | YOLO bounding box padding |
+| `YOLO_CONF` | 0.25 | Detection confidence threshold |
+
+Frames 0–89: YOLO locks ROI, collects features, shows "Initializing..."
+Frame 90+: each new feature triggers temporal inference immediately
+
+---
+
+## Google Drive Layout
+
+```
+MyDrive/DriveGuard/
+├── models/
+│   ├── vit_spatial_model_v1.pth
+│   └── best_stage4_single_cam_model.pth
+├── all_cams_ds_driveguard_spatial_roi.zip
+├── all_cams_ds_driveguard_temporal_roi.zip
+└── ViT_Features/
+    ├── train/
+    ├── val/
+    └── test/
+```

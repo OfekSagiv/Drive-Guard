@@ -1,0 +1,13 @@
+.venv/
+data/
+ds_driveguard_*/
+DriveGuard_Features/
+ViT_Features/
+*.pth
+*.pt
+*.zip
+__pycache__/
+*.pyc
+.DS_Store
+*.nosync
+CLAUDE.md
