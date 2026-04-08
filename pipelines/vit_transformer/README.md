@@ -83,15 +83,33 @@ Spatial feature extraction using **ViT-SO400M-SigLIP** (1152-dim embeddings), fo
 
 ### Step 5 — Run inference (`infer.py`)
 
+Weights and sample video are **auto-downloaded from Google Drive** on first run — no manual setup needed:
+
+```bash
+python infer.py
+```
+
+Or with custom paths:
+
 ```bash
 python infer.py \
     --video /path/to/video.mp4 \
     --spatial_weights /path/to/vit_spatial_model_v1.pth \
-    --temporal_weights /path/to/best_stage4_single_cam_model.pth \
+    --temporal_weights /path/to/temporal_head_model.pth \
     --output_video ./output.mp4
 ```
 
 Device auto-detected: Apple Silicon MPS (FP16) → CUDA (FP16) → CPU (FP32)
+
+**Real-time performance** (measured on sample video):
+
+| Metric | Value |
+|---|---|
+| Avg spatial inference | ~11 ms / sampled frame |
+| Avg temporal inference | ~2 ms / window |
+| Real-time budget | 200 ms / 6 frames |
+| GPU target | real-time ✓ |
+| CPU (Mac) | ~0.56x real-time (bottleneck: YOLO + I/O, not models) |
 
 **Key parameters:**
 
