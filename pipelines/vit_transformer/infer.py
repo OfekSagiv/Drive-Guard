@@ -15,20 +15,24 @@ Pipeline (sliding-window with 90-frame init):
     - ROI refreshed via YOLO once every CYCLE_SIZE=90 frames
     - Overlay shows live prediction
 
-Usage:
-  python infer.py \\
-      --video            /path/to/a_column_co_driver.mp4 \\
-      --spatial_weights  /path/to/best_model_fused.pth \\
-      --temporal_weights /path/to/best_stage4_single_cam_model.pth
+Weights and sample video are auto-downloaded from Google Drive on first run.
 
-  # Custom output path:
+Usage:
+  # Auto-download weights + sample video and run:
+  python infer.py
+
+  # Custom paths:
   python infer.py \\
-      --video ./clip.mp4 --spatial_weights ./spatial.pth --temporal_weights ./temporal.pth \\
-      --output_video ./out.mp4
+      --video            /path/to/video.mp4 \\
+      --spatial_weights  /path/to/vit_spatial_model_v1.pth \\
+      --temporal_weights /path/to/temporal_head_model.pth \\
+      --output_video     ./out.mp4
 """
 
 import argparse
+import subprocess
 import sys
+import time
 from collections import Counter, deque
 from pathlib import Path
 
@@ -40,6 +44,33 @@ import timm
 from PIL import Image
 from torchvision import transforms
 from ultralytics import YOLO
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Google Drive assets  (auto-downloaded on first run)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_DRIVE_ASSETS = {
+    'vit_spatial_model_v1.pth': '13oXCmdfEl3D6088dT1gLnKY1ueZwVyHu',
+    'temporal_head_model.pth' : '1lEgh8fwzBzunBQZJGhbLs-RxeJIR8zZS',
+    'sample_video.mp4'        : '1JhhimPGppUqlsa-Yqi9IsPWl66-nGsjl',
+}
+
+
+def _ensure_downloaded(filename: str) -> str:
+    """Download file from Google Drive if not already present. Returns local path."""
+    path = Path(__file__).parent / filename
+    if path.exists():
+        return str(path)
+    file_id = _DRIVE_ASSETS[filename]
+    print(f"Downloading {filename} from Google Drive …")
+    try:
+        import gdown
+    except ImportError:
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'gdown'], check=True)
+        import gdown
+    gdown.download(f'https://drive.google.com/uc?id={file_id}', str(path), quiet=False)
+    return str(path)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -129,7 +160,7 @@ class SingleViewDriveTransformer(nn.Module):
 
 TEMPORAL_CFG = {
     'input_dim'      : 1152,
-    'hidden_dim'     : 512,
+    'hidden_dim'     : 768,
     'num_heads'      : 8,
     'num_layers'     : 4,
     'dim_feedforward': 2048,
@@ -349,8 +380,12 @@ def run_inference(
     current_probs = torch.zeros(len(CLASSES))
     current_probs[current_cls] = 1.0
 
+    spatial_times:  list = []
+    temporal_times: list = []
+
     # ── Streaming pass ────────────────────────────────────────────────────────
     print(f"Processing …  (writing to {output_video})", flush=True)
+    t_start = time.perf_counter()
 
     for fidx in range(total_frames):
         ret, frame = cap.read()
@@ -371,15 +406,19 @@ def run_inference(
             batch  = tensor.unsqueeze(0).to(device)     # (1, 3, 384, 384)
             if use_fp16:
                 batch = batch.half()
+            t0 = time.perf_counter()
             with torch.no_grad():
                 feat = spatial_model(batch).squeeze(0)  # (1152,)
+            spatial_times.append(time.perf_counter() - t0)
             feature_deque.append(feat)
 
             # ── Run temporal model once deque is full ─────────────────────────
             if len(feature_deque) == WINDOW_FRAMES:
                 seq = torch.stack(list(feature_deque)).unsqueeze(0)  # (1, 16, 1152)
+                t0 = time.perf_counter()
                 with torch.no_grad():
                     logits = temporal_model(seq)
+                temporal_times.append(time.perf_counter() - t0)
                 probs = torch.softmax(logits, dim=-1).float().cpu().squeeze(0)  # (3,)
 
                 current_cls   = int(probs.argmax())
@@ -401,6 +440,7 @@ def run_inference(
         if (fidx + 1) % 300 == 0:
             print(f"  {fidx + 1}/{total_frames} frames …", flush=True)
 
+    total_wall = time.perf_counter() - t_start
     writer.release()
     cap.release()
 
@@ -413,13 +453,34 @@ def run_inference(
     final = vote.most_common(1)[0][0]
     total = len(all_predictions)
 
-    print("\n" + "═" * 32)
+    video_duration  = total_frames / fps
+    proc_fps        = total_frames / total_wall
+    realtime_factor = video_duration / total_wall
+    avg_spatial_ms  = np.mean(spatial_times)  * 1000
+    avg_temporal_ms = np.mean(temporal_times) * 1000
+    budget_ms       = (STEP / fps) * 1000      # time budget per inference at real-time
+
+    print("\n" + "═" * 42)
     print(f"  FINAL PREDICTION : {final}  ({vote[final]}/{total} windows)")
-    print("─" * 32)
+    print("─" * 42)
     for cls in CLASSES:
         n = vote.get(cls, 0)
         print(f"  {cls:<10}  {n:>7}  {n / total * 100:>5.1f}%")
-    print("═" * 32)
+    print("─" * 42)
+    print(f"  Video duration   : {video_duration:.1f}s  ({total_frames} frames @ {fps:.1f} fps)")
+    print(f"  Processing time  : {total_wall:.1f}s")
+    print(f"  Processing speed : {proc_fps:.1f} fps  (real-time = {fps:.1f} fps)")
+    print(f"  Real-time factor : {realtime_factor:.2f}x  "
+          f"({'faster' if realtime_factor >= 1.0 else 'SLOWER'} than real-time)")
+    print("─" * 42)
+    print(f"  Avg spatial  inference : {avg_spatial_ms:.1f} ms / frame sampled")
+    print(f"  Avg temporal inference : {avg_temporal_ms:.2f} ms / window")
+    print(f"  Time budget (real-time): {budget_ms:.1f} ms / {STEP} frames")
+    if avg_spatial_ms <= budget_ms:
+        print(f"  → Spatial fits real-time budget  ✓")
+    else:
+        print(f"  → Spatial EXCEEDS real-time budget by {avg_spatial_ms - budget_ms:.1f} ms")
+    print("═" * 42)
     print(f"\nDone.  Output: {output_video}")
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -432,27 +493,35 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python infer.py \\
-      --video            ./a_column_co_driver.mp4 \\
-      --spatial_weights  ./best_model_fused.pth \\
-      --temporal_weights ./best_stage4_single_cam_model.pth
+  # Auto-download weights + sample video and run:
+  python infer.py
 
+  # Custom paths:
   python infer.py \\
-      --video ./clip.mp4 --spatial_weights ./spatial.pth --temporal_weights ./temporal.pth \\
-      --output_video ./out.mp4
+      --video            ./clip.mp4 \\
+      --spatial_weights  ./vit_spatial_model_v1.pth \\
+      --temporal_weights ./temporal_head_model.pth \\
+      --output_video     ./out.mp4
         """,
     )
-    parser.add_argument('--video',            required=True)
-    parser.add_argument('--spatial_weights',  required=True)
-    parser.add_argument('--temporal_weights', required=True)
+    parser.add_argument('--video',            default=None,
+                        help='Input video path (default: auto-download sample)')
+    parser.add_argument('--spatial_weights',  default=None,
+                        help='Spatial model weights (default: auto-download)')
+    parser.add_argument('--temporal_weights', default=None,
+                        help='Temporal model weights (default: auto-download)')
     parser.add_argument('--output_video', default='inference_output.mp4',
                         help='Output video path (default: inference_output.mp4)')
     args = parser.parse_args()
 
+    spatial_weights  = args.spatial_weights  or _ensure_downloaded('vit_spatial_model_v1.pth')
+    temporal_weights = args.temporal_weights or _ensure_downloaded('temporal_head_model.pth')
+    video_path       = args.video            or _ensure_downloaded('sample_video.mp4')
+
     run_inference(
-        video_path       = args.video,
-        spatial_weights  = args.spatial_weights,
-        temporal_weights = args.temporal_weights,
+        video_path       = video_path,
+        spatial_weights  = spatial_weights,
+        temporal_weights = temporal_weights,
         output_video     = args.output_video,
     )
 

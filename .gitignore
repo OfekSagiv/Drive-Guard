@@ -11,4 +11,5 @@ __pycache__/
 *.pyc
 .DS_Store
 *.nosync
+*.mp4
 CLAUDE.md
