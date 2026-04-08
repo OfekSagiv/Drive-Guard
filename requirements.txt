@@ -4,3 +4,4 @@ torch>=2.10.0
 pandas>=3.0.1
 numpy>=2.4.3
 tqdm>=4.67.3
+gdown>=5.1.0
