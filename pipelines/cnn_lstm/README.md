@@ -9,3 +9,4 @@ This pipeline will follow the same general structure as the other pipelines in t
 2. Train a CNN spatial model to extract per-frame feature vectors
 3. Extract features for each 16-frame sequence → `.npy` tensors
 4. Train an LSTM on the feature sequences for activity classification
+5. Evaluate on the test split and compare against the ViT-Transformer baseline
