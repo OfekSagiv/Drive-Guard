@@ -10,7 +10,7 @@ Spatial feature extraction using **ViT-SO400M-SigLIP** (1152-dim embeddings), fo
 |---|---|---|---|
 | Spatial | ViT-SO400M (`vit_so400m_patch14_siglip_384`) | 384×384 ROI crops | 1152-dim feature vector |
 | Feature extraction | ViT with classifier head removed | 16-frame sequence | `(16, 1152)` .npy tensor |
-| Temporal | Transformer encoder + linear head (4 layers, 8 heads, 512 dim) | `(16, 1152)` | Safe / Drink / Phone |
+| Temporal | Transformer encoder + linear head (4 layers, 8 heads, 768 dim) | `(16, 1152)` | Safe / Drink / Phone |
 
 ---
 
@@ -37,7 +37,7 @@ Spatial feature extraction using **ViT-SO400M-SigLIP** (1152-dim embeddings), fo
 
 ---
 
-### Step 2 — Extract features (`photo_to_tensor_transformers.ipynb`)
+### Step 2 — Extract features (`photo_to_tensor_transformers.ipynb`) — [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1q6V7luC6tTFwmoJPi6sYaIUI3kAFAveH?usp=sharing)
 
 **Input:**
 - `MyDrive/DriveGuard/models/vit_spatial_model_v1.pth`
@@ -53,11 +53,24 @@ Spatial feature extraction using **ViT-SO400M-SigLIP** (1152-dim embeddings), fo
 
 ---
 
-### Step 3 — Evaluate end-to-end (`evaluate_pipeline_driveguard.ipynb`)
+### Step 3 — Train temporal model (`temporal_transformer_head.ipynb`) — [![Open in Drive](https://img.shields.io/badge/Open-Google%20Drive-blue)](https://drive.google.com/file/d/1qzFcsufgvXhpvopFnI_FtDi69xdzOTug/view?usp=sharing)
+
+**Input:** `MyDrive/DriveGuard/ViT_Features/{train,val,test}/{class}/a_column_co_driver_*.npy`
+
+- Ablation study across 8 configs (dropout, noise, phone class weight, focal loss)
+- Winner selected by Phone F1, tiebroken by macro F1
+- Full retrain of winner: Phase 1 head warmup (5 epochs) + Phase 2 differential LRs (up to 40 epochs, early stopping patience=10)
+- Architecture: 4-layer Pre-LN Transformer, 8 heads, 768 hidden dim, CLS token
+
+**Output:** `MyDrive/DriveGuard/models/temporal_head_model.pth`
+
+---
+
+### Step 4 — Evaluate end-to-end (`evaluate_pipeline_driveguard.ipynb`)
 
 **Input:**
 - `MyDrive/DriveGuard/models/vit_spatial_model_v1.pth`
-- `MyDrive/DriveGuard/models/best_stage4_single_cam_model.pth`
+- `MyDrive/DriveGuard/models/temporal_head_model.pth`
 - `ds_driveguard_temporal_roi/` zip
 
 - Runs full two-stage pipeline on test set (no cached features)
@@ -68,7 +81,7 @@ Spatial feature extraction using **ViT-SO400M-SigLIP** (1152-dim embeddings), fo
 
 ---
 
-### Step 4 — Run inference (`infer.py`)
+### Step 5 — Run inference (`infer.py`)
 
 ```bash
 python infer.py \
@@ -102,7 +115,7 @@ Frame 90+: each new feature triggers temporal inference immediately
 MyDrive/DriveGuard/
 ├── models/
 │   ├── vit_spatial_model_v1.pth
-│   └── best_stage4_single_cam_model.pth
+│   └── temporal_head_model.pth
 ├── all_cams_ds_driveguard_spatial_roi.zip
 ├── all_cams_ds_driveguard_temporal_roi.zip
 └── ViT_Features/
