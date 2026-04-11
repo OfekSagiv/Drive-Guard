@@ -67,7 +67,7 @@ Raw Video (5 camera angles)
 | Folder | Spatial Technique | Feature Dim | Temporal Technique | Status |
 |---|---|---|---|---|
 | `pipelines/vit_transformer` | ViT-SO400M (SigLIP) | 1152 | Transformer encoder | Active |
-| `pipelines/cnn_lstm` | CNN | TBD | LSTM | Coming soon |
+| `pipelines/cnn_lstm` | EfficientNet-B4 | 1792 | Bidirectional LSTM | Active |
 | `pipelines/distillation` | Knowledge Distillation | TBD | TBD | Coming soon |
 
 ---
@@ -144,7 +144,7 @@ Camera names: `inner_mirror`, `a_column_co_driver`, `ceiling`, `steering_wheel`,
 ## Quick Start
 
 ```bash
-git clone https://github.com/BarYosef212/Drive-Guard.git
+git clone https://github.com/OfekSagiv/Drive-Guard.git
 cd Drive-Guard
 pip install -r requirements.txt
 
