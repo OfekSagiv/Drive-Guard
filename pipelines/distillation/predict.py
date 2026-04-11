@@ -12,6 +12,7 @@ from torchvision.models.video import swin3d_t
 
 
 DEFAULT_CLASSES = ["Safe", "Drink", "Phone"]
+DEFAULT_CHECKPOINT = str(Path(__file__).resolve().parent / "checkpoints" / "best_swin3d_driveguard.pt")
 
 
 def get_device() -> torch.device:
@@ -20,6 +21,38 @@ def get_device() -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def _is_valid_dataset_root(path: Path) -> bool:
+    return path.exists() and (path / "train").exists() and (path / "val").exists() and (path / "test").exists()
+
+
+def resolve_data_root(data_root_arg: str) -> Path:
+    raw = Path(data_root_arg).expanduser()
+    script_dir = Path(__file__).resolve().parent
+    workspace_root = script_dir.parent.parent.parent  # .../gmar
+
+    candidates = [
+        raw,
+        Path.cwd() / raw,
+        script_dir / raw,
+        workspace_root / raw,
+        workspace_root / "matala" / raw.name,
+    ]
+
+    seen = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if _is_valid_dataset_root(resolved):
+            return resolved
+
+    raise RuntimeError(
+        "No valid dataset root found. Expected a folder containing train/val/test. "
+        f"Tried argument '{data_root_arg}' and common locations around the project."
+    )
 
 
 def get_model(num_classes: int, dropout: float = 0.3) -> nn.Module:
@@ -101,7 +134,7 @@ def plot_frames(frame_paths: List[Path], true_label: str, pred_label: str, seq_d
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Predict one random 16-frame test sequence.")
     parser.add_argument("--data_root", type=str, default="ds_driveguard_16frames_roi.nosync")
-    parser.add_argument("--checkpoint", type=str, default="checkpoints/best_swin3d_driveguard.pt")
+    parser.add_argument("--checkpoint", type=str, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--image_size", type=int, default=224)
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed for deterministic sampling.")
     return parser.parse_args()
@@ -112,10 +145,11 @@ def main() -> None:
     if args.seed is not None:
         random.seed(args.seed)
 
-    data_root = Path(args.data_root)
+    data_root = resolve_data_root(args.data_root)
     ckpt_path = Path(args.checkpoint)
     device = get_device()
     print(f"[INFO] Using device: {device}")
+    print(f"[INFO] Dataset root: {data_root}")
 
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
