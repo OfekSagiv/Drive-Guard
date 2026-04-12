@@ -71,6 +71,39 @@ Spatial feature extraction using **EfficientNet-B4** (1792-dim embeddings), foll
 
 ---
 
+### Step 4 — Run inference (`infer.py`)
+
+Weights and sample video are **auto-downloaded from Google Drive** on first run:
+
+```bash
+cd pipelines/cnn_lstm
+python infer.py
+```
+
+Or with custom paths:
+
+```bash
+python infer.py \
+    --video            /path/to/video.mp4 \
+    --spatial_weights  /path/to/efficientnet_b4_spatial_model_v1.pth \
+    --temporal_weights /path/to/lstm_temporal_head_model.pth \
+    --output_video     ./out.mp4
+```
+
+Device auto-detected: Apple Silicon MPS (FP16) → CUDA (FP16) → CPU (FP32)
+
+**Real-time performance** (measured on sample video, Apple Silicon):
+
+| Metric | Value |
+|---|---|
+| Avg spatial inference | ~22 ms / sampled frame |
+| Avg temporal inference | ~1.8 ms / window |
+| Real-time budget | 200 ms / 6 frames |
+| Processing speed | ~99 fps |
+| Real-time factor | 3.3× faster than real-time ✓ |
+
+---
+
 ## Google Drive Layout
 
 ```
