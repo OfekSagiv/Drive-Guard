@@ -53,7 +53,7 @@ Spatial feature extraction using **ViT-SO400M-SigLIP** (1152-dim embeddings), fo
 
 ---
 
-### Step 3 — Train temporal model (`temporal_transformer_head.ipynb`) — [![Open in Drive](https://img.shields.io/badge/Open-Google%20Drive-blue)](https://drive.google.com/file/d/1qzFcsufgvXhpvopFnI_FtDi69xdzOTug/view?usp=sharing)
+### Step 3 — Train temporal model (`temporal_transformer_head.ipynb`) — [![Open in Drive](https://img.shields.io/badge/Open-Google%20Drive-blue)](https://colab.research.google.com/drive/1qzFcsufgvXhpvopFnI_FtDi69xdzOTug)
 
 **Input:** `MyDrive/DriveGuard/ViT_Features/{train,val,test}/{class}/a_column_co_driver_*.npy`
 
