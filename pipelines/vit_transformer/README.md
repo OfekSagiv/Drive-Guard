@@ -23,7 +23,7 @@ Spatial feature extraction using **ViT-SO400M-SigLIP** (1152-dim embeddings), fo
 
 ---
 
-### Step 1 — Train spatial model (`ViT_spatial_model.ipynb`)
+### Step 1 — Train spatial model (`ViT_spatial_model.ipynb`) — [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1mJ1FgFPpd1Xi1gEtz_d-yVYDShJ9St2S)
 
 **Input:** `ds_driveguard_spatial_roi/` uploaded as zip to `MyDrive/DriveGuard/`
 
@@ -81,9 +81,11 @@ Spatial feature extraction using **ViT-SO400M-SigLIP** (1152-dim embeddings), fo
 
 ---
 
-### Step 5 — Run inference (`infer.py`)
+### Step 5 — Run inference (`infer.py` / `vit_transformer_head_inference.ipynb`) — [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1qTJOw8dXBFVhdIXcgqWVw0U4j1Tf1IPX)
 
-Weights and sample video are **auto-downloaded from Google Drive** on first run — no manual setup needed:
+The Colab notebook (`vit_transformer_head_inference.ipynb`) runs the full two-stage pipeline on a single video in Colab — loads both model weights from Drive, detects the person ROI with YOLO, extracts ViT spatial features, and classifies behavior with the temporal Transformer head. Use it for quick GPU-accelerated testing without a local environment.
+
+Alternatively, run locally with `infer.py`. Weights and sample video are **auto-downloaded from Google Drive** on first run — no manual setup needed:
 
 ```bash
 python infer.py
