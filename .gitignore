@@ -13,3 +13,7 @@ __pycache__/
 *.nosync
 *.mp4
 CLAUDE.md
+# vit_transformer evaluation artifacts (generated; evaluate_infer.py stays tracked)
+pipelines/vit_transformer/eval_infer_*.log
+pipelines/vit_transformer/eval_infer_*.txt
+pipelines/vit_transformer/confusion_infer_eval.png

@@ -129,6 +129,28 @@ Frame 90+: each new feature triggers temporal inference immediately
 
 ---
 
+### Step 6 — Evaluate the inference / object-detection fusion (`evaluate_infer.py`)
+
+Quantifies whether the object-detection fusion in `infer.py` actually helps, by
+running `infer.py`'s own functions over the labeled local test set and comparing
+**baseline (W=0)** vs **fused** predictions. Tunes the fusion weight `W` on the
+**val** split, locks `W*`, then reports the A/B on **test** (per-class P/R/F1,
+confusion matrices, exact McNemar). Runs locally — no Colab.
+
+```bash
+python evaluate_infer.py                 # full a_column_co_driver eval
+python evaluate_infer.py --limit 5       # fast smoke run
+python evaluate_infer.py --no_kp_gate    # diagnose keypoint-gate suppression
+```
+
+Caveats (printed at runtime): the object detector runs on the pre-cropped 384px
+ROI (not the full frame as in production), and live ROI-locking / `STEP` sampling
+are bypassed — so this measures the fusion **decision math** on labeled windows,
+not a full streaming replay. Defaults to `--camera a_column_co_driver` (the only
+camera the temporal model was trained on).
+
+---
+
 ## Google Drive Layout
 
 ```
