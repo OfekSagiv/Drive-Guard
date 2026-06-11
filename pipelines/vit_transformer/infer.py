@@ -92,6 +92,26 @@ IMG_SIZE      = 384
 ROI_PADDING   = 0.08
 YOLO_CONF     = 0.25
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Object-detection fusion  (COCO YOLOv8 soft prior over the temporal softmax)
+# ──────────────────────────────────────────────────────────────────────────────
+OBJ_CONF      = 0.30   # COCO detection confidence threshold
+FUSION_WEIGHT = 0.6    # W — strength of the object prior in log-linear fusion
+OBJ_SMOOTHING = 0.5    # Laplace smoothing on per-class window weights
+OBJ_WEIGHTS   = 'yolov8m.pt'   # COCO object detector (auto-downloaded; use yolov8s/n for real-time CPU)
+
+# False-positive control (dark-IR cabin footage is out of COCO's domain)
+OBJ_KP_RADIUS_FRAC = 0.33   # object center must be within frac*ROI-size of a hand/face keypoint
+KP_CONF            = 0.30    # min keypoint confidence to use for gating
+RELEVANT_KP        = {0, 1, 2, 3, 4, 7, 8, 9, 10}   # nose, eyes, ears, elbows, wrists
+OBJ_PERSIST_K      = 3       # display: look at last K samples
+OBJ_PERSIST_MIN    = 2       # display: draw box only if token in ≥ MIN of last K
+
+# COCO class ids → DriveGuard class.  High-precision set (drops FP-prone food/utensils).
+COCO_PHONE    = {67}                       # cell phone
+COCO_DRINK    = {39, 40, 41, 48}           # bottle, wine glass, cup, sandwich
+OBJ_CLASS_IDS = sorted(COCO_PHONE | COCO_DRINK)   # restrict YOLO inference
+
 # SigLIP normalisation — must match Stage 3 feature extraction
 NORM_MEAN = [0.5, 0.5, 0.5]
 NORM_STD  = [0.5, 0.5, 0.5]
@@ -196,6 +216,100 @@ def detect_roi_from_frame(frame: np.ndarray, yolo_model, img_h: int, img_w: int)
         return get_square_box(boxes[best], img_h, img_w)
     return None
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Object-detection soft fusion
+# ──────────────────────────────────────────────────────────────────────────────
+
+def get_person_keypoints(frame: np.ndarray, pose_model) -> np.ndarray:
+    """
+    Hand/face keypoints (nose, eyes, ears, elbows, wrists) of the most
+    confident person.  Returns (N, 2) array of (x, y) or empty (0, 2).
+    """
+    results = pose_model(frame, conf=YOLO_CONF, verbose=False)
+    if (not results or results[0].keypoints is None
+            or len(results[0].boxes) == 0):
+        return np.empty((0, 2))
+    best = int(np.argmax(results[0].boxes.conf.cpu().numpy()))
+    kp   = results[0].keypoints.data.cpu().numpy()[best]   # (17, 3): x, y, conf
+    pts  = [(x, y) for i, (x, y, c) in enumerate(kp)
+            if i in RELEVANT_KP and c >= KP_CONF]
+    return np.array(pts, dtype=np.float32) if pts else np.empty((0, 2))
+
+
+def detect_object_token(frame: np.ndarray, yolo_obj, roi: tuple,
+                        keypoints: np.ndarray = None, kp_radius: float = None):
+    """
+    Detect a phone / drink object near the driver's hands/face.
+    Returns (token, box, conf): token is 'phone'/'drink'/None, box is the
+    winning detection's (x1, y1, x2, y2) int tuple (or None), conf is its score.
+    Gates: (1) center inside ROI, (2) center within kp_radius of a hand/face
+    keypoint (skipped if no keypoints available).  Highest-confidence wins.
+    """
+    rx1, ry1, rx2, ry2 = roi
+    results = yolo_obj(frame, conf=OBJ_CONF, classes=OBJ_CLASS_IDS, verbose=False)
+    if not results or len(results[0].boxes) == 0:
+        return None, None, 0.0
+
+    boxes = results[0].boxes.xyxy.cpu().numpy()
+    confs = results[0].boxes.conf.cpu().numpy()
+    clses = results[0].boxes.cls.cpu().numpy().astype(int)
+    use_kp = keypoints is not None and len(keypoints) > 0 and kp_radius is not None
+
+    best_token, best_box, best_conf = None, None, -1.0
+    for (bx1, by1, bx2, by2), conf, cid in zip(boxes, confs, clses):
+        cx, cy = (bx1 + bx2) / 2, (by1 + by2) / 2          # box center
+        if not (rx1 <= cx <= rx2 and ry1 <= cy <= ry2):    # gate 1: ROI
+            continue
+        if use_kp:                                          # gate 2: near hand/face
+            dist = np.min(np.hypot(keypoints[:, 0] - cx, keypoints[:, 1] - cy))
+            if dist > kp_radius:
+                continue
+        if conf <= best_conf:
+            continue
+        best_conf  = float(conf)
+        best_token = 'phone' if cid in COCO_PHONE else 'drink'
+        best_box   = (int(bx1), int(by1), int(bx2), int(by2))
+    return best_token, best_box, (best_conf if best_token else 0.0)
+
+
+def compute_object_prior(object_deque) -> torch.Tensor:
+    """
+    Aggregate (token, conf) samples over the window into a smoothed prior
+    ordered [Drink, Phone, Safe].  Confidence-weighted: a detection votes its
+    class by `conf` and Safe by `1-conf`, so weak (likely-FP) detections barely
+    move the prior; None samples vote fully Safe.
+    """
+    w = torch.full((len(CLASSES),), OBJ_SMOOTHING)
+    di, pi, si = CLASSES.index('Drink'), CLASSES.index('Phone'), CLASSES.index('Safe')
+    for tok, conf in object_deque:
+        if   tok == 'drink': w[di] += conf; w[si] += (1.0 - conf)
+        elif tok == 'phone': w[pi] += conf; w[si] += (1.0 - conf)
+        else:                w[si] += 1.0
+    return w / w.sum()
+
+
+def persistent_token(object_deque) -> str:
+    """
+    Display de-flicker: return the latest token only if it appears in at least
+    OBJ_PERSIST_MIN of the last OBJ_PERSIST_K samples, else None.
+    """
+    recent = [tok for tok, _ in list(object_deque)[-OBJ_PERSIST_K:]]
+    if not recent or recent[-1] is None:
+        return None
+    return recent[-1] if recent.count(recent[-1]) >= OBJ_PERSIST_MIN else None
+
+
+def fuse_probs(temporal_probs: torch.Tensor, prior: torch.Tensor,
+               weight: float, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Log-linear (product-of-experts) fusion of the temporal softmax with the
+    object prior:  softmax( log(p_temporal) + W * log(prior) ).
+    weight=0 (or a uniform prior) reproduces the temporal distribution.
+    """
+    log_p = torch.log(temporal_probs + eps) + weight * torch.log(prior + eps)
+    return torch.softmax(log_p, dim=-1)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Preprocessing
 # ──────────────────────────────────────────────────────────────────────────────
@@ -255,6 +369,8 @@ def draw_overlay(
     roi: tuple,
     frame_idx: int,
     fps: float,
+    obj_token: str = None,
+    obj_box: tuple = None,
 ) -> np.ndarray:
     """Annotate a frame with class prediction, confidence bars, and ROI box."""
     _, w = frame.shape[:2]
@@ -265,11 +381,20 @@ def draw_overlay(
     x1, y1, x2, y2 = roi
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
+    # detected object box (the evidence behind the fusion prior)
+    if obj_box is not None and obj_token is not None:
+        ox1, oy1, ox2, oy2 = obj_box
+        oc = CLASS_COLORS[CLASSES.index('Phone')] if obj_token == 'phone' \
+            else CLASS_COLORS[CLASSES.index('Drink')]
+        cv2.rectangle(frame, (ox1, oy1), (ox2, oy2), oc, 2)
+        cv2.putText(frame, obj_token, (ox1, max(oy1 - 6, 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, oc, 2, cv2.LINE_AA)
+
     bar_x      = w - 170
     bar_w      = 140
     bar_h      = 22
     pad_y      = 12
-    banner_w, banner_h = 230, 75
+    banner_w, banner_h = 230, 100
 
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (banner_w, banner_h), (15, 15, 15), -1)
@@ -281,6 +406,13 @@ def draw_overlay(
                 (10, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.4, color, 3, cv2.LINE_AA)
     cv2.putText(frame, f'{conf * 100:.1f}%  t={frame_idx / fps:.1f}s',
                 (10, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (210, 210, 210), 1, cv2.LINE_AA)
+
+    # object-detection signal (drives the fusion prior)
+    obj_color = (200, 200, 200) if obj_token is None else (
+        CLASS_COLORS[CLASSES.index('Phone')] if obj_token == 'phone'
+        else CLASS_COLORS[CLASSES.index('Drink')])
+    cv2.putText(frame, f'obj: {obj_token or "none"}',
+                (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.50, obj_color, 1, cv2.LINE_AA)
 
     for i, (cname, p) in enumerate(zip(CLASSES, probs.tolist())):
         by   = pad_y + i * (bar_h + 8)
@@ -326,6 +458,9 @@ def run_inference(
     spatial_weights: str,
     temporal_weights: str,
     output_video: str = 'inference_output.mp4',
+    enable_fusion: bool = True,
+    fusion_weight: float = FUSION_WEIGHT,
+    obj_weights: str = OBJ_WEIGHTS,
 ):
     # ── Device ────────────────────────────────────────────────────────────────
     if torch.backends.mps.is_available():
@@ -346,6 +481,10 @@ def run_inference(
     yolo           = YOLO('yolov8n-pose.pt')
     spatial_model  = load_spatial_model(spatial_weights, device, use_fp16)
     temporal_model = load_temporal_model(temporal_weights, device, use_fp16)
+    yolo_obj       = None
+    if enable_fusion:
+        print(f"  Object detector ← {obj_weights}  (fusion weight W={fusion_weight})")
+        yolo_obj = YOLO(obj_weights)
     print("  Models ready.\n")
 
     # ── Open video ────────────────────────────────────────────────────────────
@@ -373,15 +512,19 @@ def run_inference(
     # ── Inference state ───────────────────────────────────────────────────────
     roi           = (0, 0, img_w, img_h)        # fallback: full frame
     feature_deque = deque(maxlen=WINDOW_FRAMES)  # sliding window of spatial features
+    object_deque  = deque(maxlen=WINDOW_FRAMES)  # sliding window of object tokens
     initialized   = False                        # True once deque has WINDOW_FRAMES features
     all_predictions: list = []
 
     current_cls   = CLASSES.index('Safe')
     current_probs = torch.zeros(len(CLASSES))
     current_probs[current_cls] = 1.0
+    current_obj     = None                        # last in-ROI object token (overlay)
+    current_obj_box = None                         # last in-ROI object box (overlay)
 
     spatial_times:  list = []
     temporal_times: list = []
+    object_times:   list = []
 
     # ── Streaming pass ────────────────────────────────────────────────────────
     print(f"Processing …  (writing to {output_video})", flush=True)
@@ -412,6 +555,22 @@ def run_inference(
             spatial_times.append(time.perf_counter() - t0)
             feature_deque.append(feat)
 
+            # ── Object detection on the same sampled frame ────────────────────
+            if enable_fusion:
+                t0 = time.perf_counter()
+                kps       = get_person_keypoints(frame, yolo)
+                kp_radius = OBJ_KP_RADIUS_FRAC * max(roi[2] - roi[0], roi[3] - roi[1])
+                tok, box, conf = detect_object_token(frame, yolo_obj, roi, kps, kp_radius)
+                object_times.append(time.perf_counter() - t0)
+                object_deque.append((tok, conf))
+
+                # display de-flicker: only show a box for a persistent detection
+                disp = persistent_token(object_deque)
+                if disp is not None and tok == disp:
+                    current_obj, current_obj_box = disp, box
+                else:
+                    current_obj, current_obj_box = None, None
+
             # ── Run temporal model once deque is full ─────────────────────────
             if len(feature_deque) == WINDOW_FRAMES:
                 seq = torch.stack(list(feature_deque)).unsqueeze(0)  # (1, 16, 1152)
@@ -420,6 +579,11 @@ def run_inference(
                     logits = temporal_model(seq)
                 temporal_times.append(time.perf_counter() - t0)
                 probs = torch.softmax(logits, dim=-1).float().cpu().squeeze(0)  # (3,)
+
+                # ── Fuse object prior into the temporal softmax ───────────────
+                if enable_fusion and len(object_deque) == WINDOW_FRAMES:
+                    prior = compute_object_prior(object_deque)
+                    probs = fuse_probs(probs, prior, fusion_weight)
 
                 current_cls   = int(probs.argmax())
                 current_probs = probs
@@ -432,7 +596,9 @@ def run_inference(
 
         # ── Write frame with appropriate overlay ──────────────────────────────
         if initialized:
-            draw_overlay(frame, current_cls, current_probs, roi, fidx, fps)
+            draw_overlay(frame, current_cls, current_probs, roi, fidx, fps,
+                         obj_token=current_obj if enable_fusion else None,
+                         obj_box=current_obj_box if enable_fusion else None)
         else:
             draw_init_overlay(frame, roi, fidx, fps, len(feature_deque))
         writer.write(frame)
@@ -475,6 +641,9 @@ def run_inference(
     print("─" * 42)
     print(f"  Avg spatial  inference : {avg_spatial_ms:.1f} ms / frame sampled")
     print(f"  Avg temporal inference : {avg_temporal_ms:.2f} ms / window")
+    if object_times:
+        avg_object_ms = np.mean(object_times) * 1000
+        print(f"  Avg object   detection : {avg_object_ms:.1f} ms / frame sampled  (fusion W={fusion_weight})")
     print(f"  Time budget (real-time): {budget_ms:.1f} ms / {STEP} frames")
     if avg_spatial_ms <= budget_ms:
         print(f"  → Spatial fits real-time budget  ✓")
@@ -512,6 +681,12 @@ Examples:
                         help='Temporal model weights (default: auto-download)')
     parser.add_argument('--output_video', default='inference_output.mp4',
                         help='Output video path (default: inference_output.mp4)')
+    parser.add_argument('--fusion_weight', type=float, default=FUSION_WEIGHT,
+                        help=f'Object-prior fusion weight W (default: {FUSION_WEIGHT}; 0 = temporal only)')
+    parser.add_argument('--no_object_detection', action='store_true',
+                        help='Disable object-detection fusion (temporal-only baseline)')
+    parser.add_argument('--obj_weights', default=OBJ_WEIGHTS,
+                        help=f'COCO object detector weights (default: {OBJ_WEIGHTS})')
     args = parser.parse_args()
 
     spatial_weights  = args.spatial_weights  or _ensure_downloaded('vit_spatial_model_v1.pth')
@@ -523,6 +698,9 @@ Examples:
         spatial_weights  = spatial_weights,
         temporal_weights = temporal_weights,
         output_video     = args.output_video,
+        enable_fusion    = not args.no_object_detection,
+        fusion_weight    = args.fusion_weight,
+        obj_weights      = args.obj_weights,
     )
 
 
