@@ -1,0 +1,6 @@
+# Extra deps for the IR object-detection dataset pipeline (on top of the repo's
+# root requirements.txt — ultralytics already provides SAM2).
+transformers>=5.0.0      # GroundingDINO (AutoModelForZeroShotObjectDetection)
+accelerate>=0.30.0       # GroundingDINO device placement
+anthropic>=0.40.0        # Stage 3 VLM review (needs ANTHROPIC_API_KEY)
+fiftyone>=1.0.0          # optional: human visual audit of labels / flagged set
