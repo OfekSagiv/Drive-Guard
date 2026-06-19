@@ -69,13 +69,25 @@ ALL_ACTIVITIES = OBJECT_ACTIVITIES | SAFE_ACTIVITIES
 
 SPLITS = ["train", "val", "test"]  # source CSV splits to draw frames from
 
-# ─── Stage 1: sampling ───────────────────────────────────────────────────────
-TARGET_FRAMES = 500           # approximate total images to sample
-SAFE_NEGATIVE_FRAC = 0.12     # fraction of TARGET_FRAMES reserved for Safe negatives
+# ─── Stage 1: class-aware sampling ───────────────────────────────────────────
 RANDOM_SEED = 42
-# Committed frozen dataset spec: the fixed 2000-frame set. Re-extract identical
+PER_CLASS_TARGET = 500        # target frames per intended object class
+SAFE_COUNT = 150              # small controlled negative pool (kept only as needed)
+
+# activity -> intended object class (sampling proxy; the TRUE class is set at
+# detection in Stage 2/3). cup has no dedicated Drive&Act activity, so `drinking`
+# maps to a bottle_or_cup pool and cup's real count is reported after detection.
+SAMPLE_OBJ_MAP = {
+    "interacting_with_phone": "phone", "talking_on_phone": "phone",
+    "opening_bottle": "bottle", "closing_bottle": "bottle",
+    "eating": "food", "preparing_food": "food",
+    "drinking": "bottle_or_cup",
+}
+SPLIT_RATIOS = {"train": 0.70, "val": 0.15, "test": 0.15}  # participant-grouped
+
+# Committed frozen dataset spec: the fixed class-balanced set. Re-extract identical
 # frames with `1_sample_ir_frames.py --frozen <this>`. (Tracked in git.)
-FROZEN_MANIFEST = os.path.join(PKG_DIR, "manifest_2000.csv")
+FROZEN_MANIFEST = os.path.join(PKG_DIR, "manifest_balanced.csv")
 
 # ─── Stage 2: GroundingDINO + SAM2 ───────────────────────────────────────────
 GROUNDING_MODEL = "IDEA-Research/grounding-dino-base"
