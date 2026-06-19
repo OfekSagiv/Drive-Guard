@@ -1,19 +1,26 @@
 """
-Stage 1 — Sample ~500 representative IR frames for object-detection labeling.
+Stage 1 — Build the IR frame set for object-detection labeling.
 
-Strategy
---------
-* Read the Drive&Act activity CSVs for all 5 cameras x {train,val,test}, reusing
-  the path conventions and middle-frame selection from extract_spatial_roi_ds.py.
-* Prioritize object-bearing chunks (Phone + Drink granular activities) so phones,
-  bottles, cups and food are actually visible.
-* Reserve ~12% of the budget for Safe frames as explicit hard negatives so the
-  fine-tuned detector learns to suppress false positives.
-* Keep FULL-resolution frames (no person-ROI crop): the objects are small and
-  live inference runs the detector on the full frame before gating to the ROI.
+Selection is separated from extraction:
+  * SELECTION builds a manifest from the Drive&Act CSVs alone (no video needed):
+    middle frame per chunk, Phone/Drink prioritized + ~12% Safe hard negatives.
+  * EXTRACTION reads a manifest and writes the actual full-resolution frames.
 
-Output: sampled_frames/*.jpg  +  sampled_frames/manifest.csv
-Run:    python ir_object_detection/1_sample_ir_frames.py [--target 500]
+Frozen dataset
+--------------
+The manifest IS the dataset definition. Create it once and commit it, then always
+re-extract the identical frames from it — independent of the sampling RNG:
+
+  # create the frozen spec once (fast, CSV-only, no images):
+  python 1_sample_ir_frames.py --target 2000 --no-extract --freeze-to manifest_2000.csv
+  #   -> commit ir_object_detection/manifest_2000.csv
+
+  # reproduce the exact frames anytime (locally or on Colab):
+  python 1_sample_ir_frames.py --frozen manifest_2000.csv
+
+Default (no flags): sample C.TARGET_FRAMES fresh and extract them.
+
+Output: sampled_frames/*.jpg + sampled_frames/manifest.csv
 """
 
 import argparse
@@ -55,7 +62,7 @@ def _load_rows():
 
 
 def _select(df, target, safe_frac, seed):
-    """Pick rows: all object chunks (capped to budget), then ~safe_frac negatives."""
+    """Pick rows: object chunks (capped to budget) + ~safe_frac negatives."""
     n_safe = int(round(target * safe_frac))
     n_obj = target - n_safe
 
@@ -75,66 +82,84 @@ def _select(df, target, safe_frac, seed):
     return pd.concat([obj, safe], ignore_index=True)
 
 
-def _extract(selected):
+def _build_manifest(selected):
+    """Turn selected CSV rows into a manifest (image name + middle-frame index).
+    Pure metadata — does NOT open any video."""
+    rows = []
+    for _, r in selected.iterrows():
+        file_id_str = r["file_id"].split("/")[1]
+        frame = (int(r["frame_start"]) + int(r["frame_end"])) // 2
+        name = (f"{r['camera']}__{file_id_str}__vp{r['participant_id']}"
+                f"__ann{r['annotation_id']}__ch{r['chunk_id']}{C.IMG_EXT}")
+        rows.append({
+            "image": name, "camera": r["camera"], "participant_id": r["participant_id"],
+            "file_id": r["file_id"], "annotation_id": r["annotation_id"],
+            "chunk_id": r["chunk_id"], "activity": r["activity"],
+            "group": r["group"], "src_split": r["src_split"], "frame": frame,
+        })
+    return pd.DataFrame(rows)
+
+
+def _extract(manifest):
+    """Write the actual frames listed in the manifest. Returns (#written, #missing)."""
     os.makedirs(C.SAMPLED_DIR, exist_ok=True)
-    bad_videos, manifest = set(), []
-
-    for _, row in selected.iterrows():
-        cam = row["camera"]
+    bad_videos, written, missing = set(), 0, 0
+    for _, row in manifest.iterrows():
         vp_folder, file_id_str = row["file_id"].split("/")
-        video_path = os.path.join(C.DATA_ROOT, "data", cam, vp_folder, f"{file_id_str}.mp4")
+        video_path = os.path.join(C.DATA_ROOT, "data", row["camera"], vp_folder, f"{file_id_str}.mp4")
         if video_path in bad_videos or not os.path.exists(video_path):
-            continue
-
+            missing += 1; continue
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            bad_videos.add(video_path)
-            cap.release()
-            continue
-
-        mid_f = (int(row["frame_start"]) + int(row["frame_end"])) // 2  # middle frame
-        cap.set(cv2.CAP_PROP_POS_FRAMES, mid_f)
+            bad_videos.add(video_path); cap.release(); missing += 1; continue
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(row["frame"]))
         ret, frame = cap.read()
         cap.release()
         if not ret:
-            continue
-
-        name = (f"{cam}__{file_id_str}__vp{row['participant_id']}"
-                f"__ann{row['annotation_id']}__ch{row['chunk_id']}{C.IMG_EXT}")
-        out_path = os.path.join(C.SAMPLED_DIR, name)
-        if not cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95]):
-            continue
-
-        manifest.append({
-            "image": name, "camera": cam, "participant_id": row["participant_id"],
-            "file_id": row["file_id"], "annotation_id": row["annotation_id"],
-            "chunk_id": row["chunk_id"], "activity": row["activity"],
-            "group": row["group"], "src_split": row["src_split"], "frame": mid_f,
-        })
-    return pd.DataFrame(manifest)
+            missing += 1; continue
+        out_path = os.path.join(C.SAMPLED_DIR, row["image"])
+        if cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95]):
+            written += 1
+        else:
+            missing += 1
+    return written, missing
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--target", type=int, default=C.TARGET_FRAMES)
+    ap.add_argument("--target", type=int, default=C.TARGET_FRAMES, help="frames to sample (sample mode)")
     ap.add_argument("--safe-frac", type=float, default=C.SAFE_NEGATIVE_FRAC)
     ap.add_argument("--seed", type=int, default=C.RANDOM_SEED)
+    ap.add_argument("--frozen", metavar="MANIFEST", help="re-extract the exact frames from a committed manifest")
+    ap.add_argument("--freeze-to", metavar="PATH", help="also write the manifest to PATH (the committable frozen spec)")
+    ap.add_argument("--no-extract", action="store_true", help="only build the manifest, don't write images")
     args = ap.parse_args()
 
-    df = _load_rows()
-    # Dedup: at most one frame per (camera, annotation, chunk).
-    df = df.drop_duplicates(subset=["camera", "file_id", "annotation_id", "chunk_id"])
-    selected = _select(df, args.target, args.safe_frac, args.seed)
-    manifest = _extract(selected)
+    if args.frozen:
+        manifest = pd.read_csv(args.frozen)
+        print(f"Frozen mode: {len(manifest)} frames from {args.frozen}")
+    else:
+        df = _load_rows().drop_duplicates(
+            subset=["camera", "file_id", "annotation_id", "chunk_id"])  # 1 frame / chunk
+        manifest = _build_manifest(_select(df, args.target, args.safe_frac, args.seed))
 
-    if manifest.empty:
-        raise SystemExit("No frames extracted — check DATA_ROOT and that data/ videos exist.")
+    os.makedirs(C.SAMPLED_DIR, exist_ok=True)
     manifest.to_csv(C.MANIFEST_CSV, index=False)
+    if args.freeze_to:
+        manifest.to_csv(args.freeze_to, index=False)
+        print(f"Frozen spec written: {args.freeze_to}  (commit this)")
 
-    print(f"\nSaved {len(manifest)} frames to {C.SAMPLED_DIR}")
-    print(f"Manifest: {C.MANIFEST_CSV}")
-    print("\nBy group:\n" + manifest["group"].value_counts().to_string())
-    print("\nBy camera:\n" + manifest["camera"].value_counts().to_string())
+    print(f"\nManifest: {len(manifest)} frames")
+    print("By group:\n" + manifest["group"].value_counts().to_string())
+    print("By camera:\n" + manifest["camera"].value_counts().to_string())
+
+    if args.no_extract:
+        print("\n--no-extract: manifest only, no images written.")
+        return
+    written, missing = _extract(manifest)
+    if written == 0:
+        raise SystemExit("No frames extracted — check DATA_ROOT and that data/ videos exist.")
+    print(f"\nExtracted {written} frames to {C.SAMPLED_DIR}" + (f"  ({missing} missing)" if missing else ""))
 
 
 if __name__ == "__main__":
