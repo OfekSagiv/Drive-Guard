@@ -298,7 +298,7 @@ def detect_object_token(frame: np.ndarray, yolo_obj, roi: tuple,
     return best_token, best_box, (best_conf if best_token else 0.0)
 
 
-def compute_object_prior(object_deque) -> torch.Tensor:
+def compute_object_prior(object_deque, window_size: int = WINDOW_FRAMES) -> torch.Tensor:
     """Build a normalized object prior from the 16-frame detection window.
 
     Formula: w[class] += Σconf_for_class / window_size
@@ -308,13 +308,12 @@ def compute_object_prior(object_deque) -> torch.Tensor:
     None frames add nothing; Laplace smoothing supplies the neutral floor.
     All-None window → [0.33, 0.33, 0.33] → log-linear fusion = temporal-only.
     """
-    N = len(object_deque)
     w = torch.full((len(CLASSES),), OBJ_SMOOTHING)
     for tok, conf in object_deque:
         if tok == 'phone':
-            w[PHONE_IDX] += conf / N
+            w[PHONE_IDX] += conf / window_size
         elif tok == 'drink':
-            w[DRINK_IDX] += conf / N
+            w[DRINK_IDX] += conf / window_size
     return w / w.sum()
 
 
