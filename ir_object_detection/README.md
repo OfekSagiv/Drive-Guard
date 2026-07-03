@@ -13,6 +13,8 @@ benefit, best fusion weight W=0; see `pipelines/vit_transformer/`).
 The fix is an **in-domain detector**, which needs an IR detection dataset — this
 folder produces it.
 
+The COCO fusion experiment result that established the technical trigger: `yolov8m.pt` achieved only **~24% in-ROI clip detection rate** at mean confidence ~0.46 on Drive&Act IR, producing **W\* = 0.0** (optimizer turned fusion off) and **McNemar p = 1.0** — zero statistically significant improvement over the temporal baseline at 0.9399 accuracy. See `docs/fusion_experiment.md` for the full experiment log.
+
 ## How it works (4 stages + 2 tools)
 
 ```
@@ -52,6 +54,12 @@ split into the manifest and prints a per-class **ceiling report**.
 - Phrases are mapped to the 4 classes; **confidence is preserved** in
   `predictions.jsonl` (YOLO `.txt` can't hold scores).
 
+Threshold calibration history (explains the values in `config.py`):
+- GroundingDINO at default `0.12/0.12` over-detected massively (~10 boxes/img on ROI crops). Sweep settled on `box=0.35, text=0.25`.
+- **Food = 0 detections at any threshold** on raw IR. Food prompt expansion (23 precise terms: `sandwich . snack . banana . bread . apple . wrapper …`) was tried and **failed** — long prompts dilute per-token GD text scores, killing the one term (`food`) that had any recall. The current `"cell phone . bottle . cup . food ."` is the result of that failure; don't try to expand it.
+- Per-class thresholds (`phone/drink: 0.35, food: 0.22`) were adopted after food recall improved from 1/35 → 9/35 at the lower bar with zero added FPs on non-food images.
+- CLAHE + gamma enhancement (`--enhance` flag): helps drink +30% and food +11% detection recall, but adds console FPs — pair with Stage-3 cleanup. Tested for Opus verification crops too: **0 recovery, adds noise** — enhancement belongs at detection, not verification.
+
 ### Stage 3 — AI-assisted review (heuristics + Claude Opus 4.8)
 Two passes that *propose* refinements:
 
@@ -74,6 +82,19 @@ Two passes that *propose* refinements:
 
 The decision mix (`accept_high`, `accept_vlm`, `drop_vlm_fp`, `drop_keypoint_gate`,
 `flag`) is printed at the end and recorded in `qc_report.md`.
+
+**Annotation approach evolution — why `build_rgb_transfer.py` exists:**
+
+The dark-IR pipeline above hit a ceiling: food recall capped at ~26–46% and console FPs on drinking frames could not be resolved by threshold tuning (console detections fire at *higher* confidence than real drinking-at-face boxes, so raising the threshold kills TPs first). The breakthrough was to stop fighting IR detection and instead leverage the Drive&Act co-driver camera's synchronized RGB/IR pair:
+
+| Approach | Food recall | Phone recall | Drink recall |
+|---|---|---|---|
+| Dark-IR path (GD+SAM2, Stages 2→3) | ~26–46% | better, but console FPs | better, but console FPs |
+| **RGB→IR transfer (`build_rgb_transfer.py`, Path 1d)** | **~63%** | **~78%** | **~91%** |
+
+Transfer method: detect on bright RGB (`kinect_color`) with GroundingDINO → filter boxes near wrist keypoints (drops console/lap FPs) → warp into IR via per-frame homography fit from 3D-projected body joints (RGB joints from YOLO-pose; IR joints from `openpose_3d` + camera calibration). Full-scale on 2,176 frames: **1,517 labeled frames (≥1 box)**, 2,210 total boxes (phone 854 · drink 1,017 · food 339), 157 Safe negatives. Full experiment log and all negative results (failed prompt expansion, failed homography variants, CLAHE-on-Opus failure): `docs/ir_dataset_experiments.md`.
+
+**Parallel live probe — YOLO-World on the Reolink IR camera:** `pipelines/vit_transformer/explore_yoloworld_ir.py` is testing YOLO-World as a one-directional Phone verifier on the higher-quality Reolink IR stream (much better contrast than Drive&Act 2014 NIR). Early results show `smartphone` detecting at 0.57–0.88 conf when held and **0 detections on empty-hand frames** — a key property the COCO detector never had. If a labeled driving-position test (phone-to-ear vs hand-to-ear) confirms clean separation, a verifier that *demotes* Phone→Safe when no phone is detected can be integrated without waiting for the full YOLO fine-tuning pipeline.
 
 ### Stage 4 — build dataset + QC
 Assembles the Ultralytics YOLO layout (`images/`, `labels/`, `data.yaml`), splits
