@@ -29,7 +29,7 @@ import torch.nn as nn
 import timm
 from PIL import Image
 from torchvision import transforms
-from ultralytics import YOLO
+from ultralytics import YOLO, YOLOE
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Paths
@@ -95,6 +95,29 @@ PROC_WIDTH        = 640
 
 NORM_MEAN = [0.5, 0.5, 0.5]
 NORM_STD  = [0.5, 0.5, 0.5]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Object-detection fusion  (YOLOE-26-L soft prior)
+# ──────────────────────────────────────────────────────────────────────────────
+OBJ_CONF           = 0.25   # confidence threshold (tuned for IR, 0.6–0.85 signals observed)
+OBJ_SMOOTHING      = 0.5    # Laplace smoothing — neutral floor for all classes
+FUSION_WEIGHT      = 0.6    # W in log-linear fusion; starting point, tune via W sweep
+OBJ_KP_RADIUS_FRAC = 0.33   # object center must be within frac×ROI-size of a keypoint
+KP_CONF            = 0.30   # minimum keypoint confidence to use
+RELEVANT_KP        = {0, 1, 2, 3, 4, 7, 8, 9, 10}  # nose, eyes, ears, elbows, wrists
+OBJ_PERSIST_K      = 3      # de-flicker: look at last K detection samples
+OBJ_PERSIST_MIN    = 2      # de-flicker: draw box only if token seen in ≥ MIN of last K
+
+# YOLOE-26-L open-vocabulary prompts → DriveGuard tokens
+YW_PHONE_CLASSES = ['smartphone', 'cell phone']
+YW_DRINK_CLASSES = ['mug', 'cup', 'bottle', 'drinking glass']
+YW_ALL_CLASSES   = YW_PHONE_CLASSES + YW_DRINK_CLASSES   # 6 prompts
+YW_PHONE_SET     = set(YW_PHONE_CLASSES)
+YW_DRINK_SET     = set(YW_DRINK_CLASSES)
+
+DRINK_IDX = CLASSES.index('Drink')
+PHONE_IDX = CLASSES.index('Phone')
+SAFE_IDX  = CLASSES.index('Safe')
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Temporal Model
@@ -174,6 +197,143 @@ def crop_and_preprocess(frame_bgr, roi):
     x1, y1, x2, y2 = roi
     return _PREPROCESS(Image.fromarray(
         cv2.cvtColor(frame_bgr[y1:y2, x1:x2], cv2.COLOR_BGR2RGB)))
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Object-detection fusion helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _box_area(xyxy) -> float:
+    x1, y1, x2, y2 = xyxy
+    return max(0, x2 - x1) * max(0, y2 - y1)
+
+
+def _intersection(a, b) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    return max(0, ix2 - ix1) * max(0, iy2 - iy1)
+
+
+def suppress_contained(dets: list, contain_thresh: float = 0.8) -> list:
+    """Drop boxes mostly swallowed by a higher-confidence box.
+
+    Plain IoU-NMS misses small boxes nested inside large ones because the large
+    box's extra area dominates the union. This checks intersection/own_area instead.
+    Input dets must be sorted by confidence descending.
+    """
+    kept = []
+    for d in dets:
+        area = _box_area(d['xyxy'])
+        if area <= 0:
+            continue
+        swallowed = any(
+            _intersection(d['xyxy'], k['xyxy']) / area > contain_thresh
+            for k in kept
+        )
+        if not swallowed:
+            kept.append(d)
+    return kept
+
+
+def get_person_keypoints(frame: np.ndarray, pose_model) -> np.ndarray:
+    """Return (N, 2) xy array of hand/face keypoints for the most confident person."""
+    results = pose_model(frame, conf=YOLO_CONF, verbose=False)
+    if (not results or results[0].keypoints is None
+            or len(results[0].boxes) == 0):
+        return np.empty((0, 2))
+    best = int(np.argmax(results[0].boxes.conf.cpu().numpy()))
+    kp   = results[0].keypoints.data.cpu().numpy()[best]   # (17, 3)
+    pts  = [(x, y) for i, (x, y, c) in enumerate(kp)
+            if i in RELEVANT_KP and c >= KP_CONF]
+    return np.array(pts, dtype=np.float32) if pts else np.empty((0, 2))
+
+
+def detect_object_token(frame: np.ndarray, yolo_obj, roi: tuple,
+                        keypoints: np.ndarray = None, kp_radius: float = None):
+    """Detect phone/drink near driver's hands/face using YOLOE-26-L.
+
+    Returns (token, box, conf): token ∈ {'phone', 'drink', None}.
+    Gates: (1) box center inside ROI; (2) center within kp_radius of a keypoint.
+    agnostic_nms=True is set in the predict call to suppress cross-prompt duplicates.
+    suppress_contained() is applied after parsing to catch nested boxes IoU-NMS misses.
+    """
+    rx1, ry1, rx2, ry2 = roi
+    results = yolo_obj.predict(frame, conf=OBJ_CONF, iou=0.5,
+                               agnostic_nms=True, verbose=False)
+    if not results or len(results[0].boxes) == 0:
+        return None, None, 0.0
+
+    boxes = results[0].boxes.xyxy.cpu().numpy()
+    confs = results[0].boxes.conf.cpu().numpy()
+    clses = results[0].boxes.cls.cpu().numpy().astype(int)
+    names = results[0].names   # {int: str} — YOLOE class names from set_classes()
+
+    # Parse into list of dicts, sort by conf descending, apply containment filter
+    dets = sorted(
+        [{'name': names[c], 'conf': float(cf), 'xyxy': (int(x1), int(y1), int(x2), int(y2))}
+         for (x1, y1, x2, y2), cf, c in zip(boxes, confs, clses)],
+        key=lambda d: d['conf'], reverse=True,
+    )
+    dets = suppress_contained(dets, 0.8)
+
+    use_kp = keypoints is not None and len(keypoints) > 0 and kp_radius is not None
+    best_token, best_box, best_conf = None, None, -1.0
+
+    for d in dets:
+        bx1, by1, bx2, by2 = d['xyxy']
+        cx, cy = (bx1 + bx2) / 2, (by1 + by2) / 2
+        if not (rx1 <= cx <= rx2 and ry1 <= cy <= ry2):   # gate 1: ROI
+            continue
+        if use_kp:                                          # gate 2: keypoint proximity
+            dist = np.min(np.hypot(keypoints[:, 0] - cx, keypoints[:, 1] - cy))
+            if dist > kp_radius:
+                continue
+        if d['conf'] <= best_conf:
+            continue
+        best_conf  = d['conf']
+        best_token = 'phone' if d['name'] in YW_PHONE_SET else 'drink'
+        best_box   = (bx1, by1, bx2, by2)
+
+    return best_token, best_box, (best_conf if best_token else 0.0)
+
+
+def compute_object_prior(object_deque) -> torch.Tensor:
+    """Build a normalized object prior from the 16-frame detection window.
+
+    Formula: w[class] += Σconf_for_class / window_size
+    This equals mean_conf × detection_rate, naturally bounded to [0, 1].
+    Consecutive detections are correlated, so linear accumulation would inflate
+    the prior — dividing by window_size corrects for this.
+    None frames add nothing; Laplace smoothing supplies the neutral floor.
+    All-None window → [0.33, 0.33, 0.33] → log-linear fusion = temporal-only.
+    """
+    N = len(object_deque)
+    w = torch.full((len(CLASSES),), OBJ_SMOOTHING)
+    for tok, conf in object_deque:
+        if tok == 'phone':
+            w[PHONE_IDX] += conf / N
+        elif tok == 'drink':
+            w[DRINK_IDX] += conf / N
+    return w / w.sum()
+
+
+def persistent_token(object_deque) -> str | None:
+    """De-flicker: return latest token only if it appears ≥ OBJ_PERSIST_MIN of last K."""
+    recent = [tok for tok, _ in list(object_deque)[-OBJ_PERSIST_K:]]
+    if not recent or recent[-1] is None:
+        return None
+    return recent[-1] if recent.count(recent[-1]) >= OBJ_PERSIST_MIN else None
+
+
+def fuse_probs(temporal_probs: torch.Tensor, prior: torch.Tensor,
+               weight: float, eps: float = 1e-6) -> torch.Tensor:
+    """Log-linear (product-of-experts) fusion: softmax(log p_temporal + W·log prior).
+
+    W=0 or uniform prior → reproduces temporal distribution exactly.
+    """
+    log_p = torch.log(temporal_probs + eps) + weight * torch.log(prior + eps)
+    return torch.softmax(log_p, dim=-1)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Model Loading
