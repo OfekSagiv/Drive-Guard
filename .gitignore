@@ -14,6 +14,7 @@ __pycache__/
 *.nosync
 *.mp4
 CLAUDE.md
+DriveGuard/.env
 
 ir_object_detection/sampled_frames/
 ir_object_detection/sampled_frames_roi/
@@ -31,3 +32,5 @@ pipelines/vit_transformer/eval_infer_*.log
 pipelines/vit_transformer/eval_infer_*.txt
 pipelines/vit_transformer/confusion_infer_eval.png
 ir_object_detection/rgb_transfer/
+
+docs/
