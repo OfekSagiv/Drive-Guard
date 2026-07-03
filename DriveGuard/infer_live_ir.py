@@ -360,8 +360,8 @@ def load_temporal_model(weights_path, device, use_fp16, cfg=None):
 def build_models(spatial_weights: str, temporal_weights: str) -> dict:
     """
     Load all models and return as a dict for GUI caching.
-    Call from a background thread — takes ~30s on first run.
-    Returns: {'device', 'use_fp16', 'yolo', 'spatial', 'temporal'}
+    Call from a background thread — takes ~30s on first run (includes YOLOE-26-L download).
+    Returns: {'device', 'use_fp16', 'yolo', 'yolo_obj', 'spatial', 'temporal'}
     """
     if torch.backends.mps.is_available():
         device, use_fp16 = torch.device('mps'), True
@@ -375,12 +375,16 @@ def build_models(spatial_weights: str, temporal_weights: str) -> dict:
 
     print("\nLoading models …")
     yolo = YOLO(str(_WEIGHTS_DIR / 'yolov8n-pose.pt'))
+    print("  Object detector ← yoloe-26l-seg.pt  (YOLOE-26-L, auto-download if absent)")
+    yolo_obj = YOLOE('yoloe-26l-seg.pt')
+    yolo_obj.set_classes(YW_ALL_CLASSES)
     spatial_model  = load_spatial_model(spatial_weights, device, use_fp16)
     temporal_model = load_temporal_model(temporal_weights, device, use_fp16)
     print("  Models ready.\n")
 
     return dict(device=device, use_fp16=use_fp16,
-                yolo=yolo, spatial=spatial_model, temporal=temporal_model)
+                yolo=yolo, yolo_obj=yolo_obj,
+                spatial=spatial_model, temporal=temporal_model)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Overlay Rendering
