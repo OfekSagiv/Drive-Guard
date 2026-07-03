@@ -305,7 +305,9 @@ def compute_object_prior(object_deque, window_size: int = WINDOW_FRAMES) -> torc
     This equals mean_conf × detection_rate, naturally bounded to [0, 1].
     Consecutive detections are correlated, so linear accumulation would inflate
     the prior — dividing by window_size corrects for this.
-    None frames add nothing; Laplace smoothing supplies the neutral floor.
+    None-token frames are appended as (None, 0.0) and contribute nothing to the
+    prior since compute_object_prior skips None tokens; Laplace smoothing supplies
+    the neutral floor.
     All-None window → [0.33, 0.33, 0.33] → log-linear fusion = temporal-only.
     """
     w = torch.full((len(CLASSES),), OBJ_SMOOTHING)
@@ -535,8 +537,7 @@ def run_live(
     roi           = (0, 0, img_w, img_h)
     feature_deque = deque(maxlen=WINDOW_FRAMES)
     object_deque    = deque(maxlen=WINDOW_FRAMES)
-    current_obj     = None
-    current_obj_box = None
+    current_obj   = None
     initialized   = False
     all_predictions = []
     current_cls   = CLASSES.index('Safe')
@@ -588,14 +589,16 @@ def run_live(
                     object_deque.append((tok, conf))
                     disp = persistent_token(object_deque)
                     if disp is not None and tok == disp:
-                        current_obj, current_obj_box = disp, box
+                        current_obj = disp
                     else:
-                        current_obj, current_obj_box = None, None
+                        current_obj = None
 
                 # Report init progress to the UI on each new feature
                 if not initialized:
                     n = len(feature_deque)
                     _status(f'Initializing…  {n} / {WINDOW_FRAMES} features', '#ffaa00')
+                    if on_prediction is not None and n < WINDOW_FRAMES:
+                        on_prediction(None, None, None, None, False)
 
                 if len(feature_deque) == WINDOW_FRAMES:
                     seq = torch.stack(list(feature_deque)).unsqueeze(0)

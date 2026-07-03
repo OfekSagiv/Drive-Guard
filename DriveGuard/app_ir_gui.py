@@ -352,7 +352,8 @@ class DriveGuardApp(ctk.CTk):
         self._stop_btn.configure(state='normal', fg_color='#7a1a1a', hover_color='#601515')
         self._src_entry.configure(state='disabled')
         self._set_status('Loading models…', '#ffaa00')
-        self._worker = threading.Thread(target=self._worker_fn, daemon=True)
+        fusion_on = self._fusion_var.get()
+        self._worker = threading.Thread(target=self._worker_fn, args=(fusion_on,), daemon=True)
         self._worker.start()
 
     def _stop(self):
@@ -391,7 +392,7 @@ class DriveGuardApp(ctk.CTk):
 
     # ── Worker thread ─────────────────────────────────────────────────────────
 
-    def _worker_fn(self):
+    def _worker_fn(self, fusion_on: bool):
         try:
             source = self._src_var.get().strip()
             try:
@@ -413,7 +414,7 @@ class DriveGuardApp(ctk.CTk):
                 on_frame       = self._stash_frame,
                 on_prediction  = self._stash_pred,
                 on_status      = self._set_status,
-                enable_fusion  = self._fusion_var.get(),
+                enable_fusion  = fusion_on,
             )
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -428,18 +429,21 @@ class DriveGuardApp(ctk.CTk):
         with self._lock:
             self._frame = bgr
 
-    def _stash_pred(self, cls_idx: int, temporal_probs, prior, fused_probs, initialized: bool):
+    def _stash_pred(self, cls_idx, temporal_probs, prior, fused_probs, initialized: bool):
         def _to_list(t):
             if t is None:
                 return None
             return t.tolist() if hasattr(t, 'tolist') else list(t)
         with self._lock:
+            self._initialized = initialized
+            if cls_idx is None:
+                # Warmup tick: propagate initialized=False without updating prediction state
+                return
             self._cls_idx        = cls_idx
             self._probs          = _to_list(fused_probs if fused_probs is not None else temporal_probs)
             self._temporal_probs = _to_list(temporal_probs)
             self._prior          = _to_list(prior)
             self._fused_probs    = _to_list(fused_probs)
-            self._initialized    = initialized
             if initialized:
                 self._window_counts[CLASSES[cls_idx]] += 1
 
@@ -468,6 +472,8 @@ class DriveGuardApp(ctk.CTk):
                                prior=prior,
                                fused_probs=fused_probs,
                                initialized=init)
+        elif not init and self._running:
+            self._panel.update(None, None, initialized=False)
 
         if self._session_start is not None:
             elapsed = time.monotonic() - self._session_start
