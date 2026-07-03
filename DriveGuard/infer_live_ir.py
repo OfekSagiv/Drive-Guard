@@ -451,9 +451,12 @@ def run_live(
     models: dict = None,       # pre-built from build_models(); skips loading
     headless: bool = False,    # True → skip cv2.imshow
     on_frame=None,             # callback(bgr_ndarray) — every annotated frame
-    on_prediction=None,        # callback(cls_idx, probs, initialized)
+    on_prediction=None,        # callback(cls_idx, temporal_probs, prior, fused_probs, initialized)
     should_run=None,           # callable() → bool; loop exits when False
     on_status=None,            # callback(text, color)
+    # ── Fusion params ─────────────────────────────────────────────────────────
+    enable_fusion: bool = True,
+    fusion_weight: float = FUSION_WEIGHT,
     # ── CLI-only params (ignored when models= is provided) ────────────────────
     spatial_weights: str = None,
     temporal_weights: str = None,
@@ -469,7 +472,8 @@ def run_live(
     # ── Models ────────────────────────────────────────────────────────────────
     if models is not None:
         device, use_fp16 = models['device'], models['use_fp16']
-        yolo = models['yolo']
+        yolo           = models['yolo']
+        yolo_obj       = models.get('yolo_obj')
         spatial_model  = models['spatial']
         temporal_model = models['temporal']
     else:
@@ -480,7 +484,11 @@ def run_live(
         else:
             device, use_fp16 = torch.device('cpu'), False
         print("\nLoading models …")
-        yolo           = YOLO(str(_WEIGHTS_DIR / 'yolov8n-pose.pt'))
+        yolo     = YOLO(str(_WEIGHTS_DIR / 'yolov8n-pose.pt'))
+        yolo_obj = None
+        if enable_fusion:
+            yolo_obj = YOLOE('yoloe-26l-seg.pt')
+            yolo_obj.set_classes(YW_ALL_CLASSES)
         spatial_model  = load_spatial_model(spatial_weights, device, use_fp16)
         temporal_model = load_temporal_model(temporal_weights, device, use_fp16)
         print("  Models ready.\n")
@@ -526,6 +534,9 @@ def run_live(
 
     roi           = (0, 0, img_w, img_h)
     feature_deque = deque(maxlen=WINDOW_FRAMES)
+    object_deque    = deque(maxlen=WINDOW_FRAMES)
+    current_obj     = None
+    current_obj_box = None
     initialized   = False
     all_predictions = []
     current_cls   = CLASSES.index('Safe')
@@ -567,6 +578,20 @@ def run_live(
                     feat = spatial_model(batch).squeeze(0)
                 feature_deque.append(feat)
 
+                # ── Object detection (synchronized with feature sampling) ──────
+                if enable_fusion and yolo_obj is not None:
+                    kps       = get_person_keypoints(frame, yolo)
+                    kp_radius = OBJ_KP_RADIUS_FRAC * max(roi[2] - roi[0],
+                                                          roi[3] - roi[1])
+                    tok, box, conf = detect_object_token(
+                        frame, yolo_obj, roi, kps, kp_radius)
+                    object_deque.append((tok, conf))
+                    disp = persistent_token(object_deque)
+                    if disp is not None and tok == disp:
+                        current_obj, current_obj_box = disp, box
+                    else:
+                        current_obj, current_obj_box = None, None
+
                 # Report init progress to the UI on each new feature
                 if not initialized:
                     n = len(feature_deque)
@@ -576,7 +601,16 @@ def run_live(
                     seq = torch.stack(list(feature_deque)).unsqueeze(0)
                     with torch.no_grad():
                         logits = temporal_model(seq)
-                    probs = torch.softmax(logits, dim=-1).float().cpu().squeeze(0)
+                    temporal_probs = torch.softmax(logits, dim=-1).float().cpu().squeeze(0)
+
+                    # Fusion
+                    prior       = None
+                    fused_probs = None
+                    if enable_fusion and yolo_obj is not None and len(object_deque) == WINDOW_FRAMES:
+                        prior       = compute_object_prior(object_deque)
+                        fused_probs = fuse_probs(temporal_probs, prior, fusion_weight)
+
+                    probs         = fused_probs if fused_probs is not None else temporal_probs
                     current_cls   = int(probs.argmax())
                     current_probs = probs
                     all_predictions.append(CLASSES[current_cls])
@@ -584,7 +618,7 @@ def run_live(
                         initialized = True
                         print(f"  Initialized  (first: {CLASSES[current_cls]})", flush=True)
                     if on_prediction is not None:
-                        on_prediction(current_cls, current_probs, initialized)
+                        on_prediction(current_cls, temporal_probs, prior, fused_probs, initialized)
 
             fps_frames += 1
             if fps_frames >= 30:
