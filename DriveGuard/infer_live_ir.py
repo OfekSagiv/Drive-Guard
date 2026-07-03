@@ -101,7 +101,7 @@ NORM_STD  = [0.5, 0.5, 0.5]
 # ──────────────────────────────────────────────────────────────────────────────
 OBJ_CONF           = 0.25   # confidence threshold (tuned for IR, 0.6–0.85 signals observed)
 OBJ_SMOOTHING      = 0.5    # Laplace smoothing — neutral floor for all classes
-FUSION_WEIGHT      = 0.6    # W in log-linear fusion; starting point, tune via W sweep
+FUSION_WEIGHT      = 1.5    # W in log-linear fusion; starting point, tune via W sweep
 OBJ_KP_RADIUS_FRAC = 0.33   # object center must be within frac×ROI-size of a keypoint
 KP_CONF            = 0.30   # minimum keypoint confidence to use
 RELEVANT_KP        = {0, 1, 2, 3, 4, 7, 8, 9, 10}  # nose, eyes, ears, elbows, wrists
