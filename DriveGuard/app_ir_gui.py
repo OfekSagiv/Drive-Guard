@@ -305,6 +305,22 @@ class DriveGuardApp(ctk.CTk):
         )
         self._stop_btn.pack(side='left')
 
+        ctk.CTkLabel(
+            top, text='Object Det.', font=ctk.CTkFont(size=11),
+            text_color='#666666',
+        ).pack(side='right', padx=(0, 4))
+
+        self._fusion_var = ctk.BooleanVar(value=True)
+        ctk.CTkSwitch(
+            top,
+            text='',
+            variable=self._fusion_var,
+            onvalue=True,
+            offvalue=False,
+            width=40,
+            height=20,
+        ).pack(side='right', padx=(16, 4))
+
         self._status_lbl = ctk.CTkLabel(
             top, text='Idle', font=ctk.CTkFont(size=11),
             text_color='#555555',
@@ -389,14 +405,15 @@ class DriveGuardApp(ctk.CTk):
                 self._models = build_models(sw, tw)
 
             run_live(
-                source        = source,
-                proc_width    = proc_w,
-                models        = self._models,
-                headless      = True,
-                should_run    = lambda: self._running,
-                on_frame      = self._stash_frame,
-                on_prediction = self._stash_pred,
-                on_status     = self._set_status,
+                source         = source,
+                proc_width     = proc_w,
+                models         = self._models,
+                headless       = True,
+                should_run     = lambda: self._running,
+                on_frame       = self._stash_frame,
+                on_prediction  = self._stash_pred,
+                on_status      = self._set_status,
+                enable_fusion  = self._fusion_var.get(),
             )
         except Exception as e:
             import traceback; traceback.print_exc()
