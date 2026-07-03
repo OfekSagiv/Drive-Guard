@@ -113,7 +113,28 @@ class ClassPanel(ctk.CTkFrame):
             lbl.pack(side='right')
             self._count_lbls[cls] = lbl
 
-    def update(self, cls_idx: int, probs: list, counts: dict = None):
+        # Fusion detail rows (shown only when YOLOE prior is available)
+        ctk.CTkFrame(self, height=1, fg_color='#2a2a2a').pack(
+            fill='x', padx=18, pady=(8, 8))
+
+        self._fusion_frame = ctk.CTkFrame(self, fg_color='transparent')
+        self._fusion_frame.pack(fill='x', padx=18, pady=(0, 8))
+
+        self._fusion_rows: dict[str, ctk.CTkLabel] = {}
+        for row_name in ('Temporal', 'OD Prior', 'Fused'):
+            lbl = ctk.CTkLabel(
+                self._fusion_frame,
+                text=f'{row_name}: —',
+                font=ctk.CTkFont(family='Courier', size=10),
+                text_color='#444444',
+                anchor='w',
+            )
+            lbl.pack(fill='x', pady=1)
+            self._fusion_rows[row_name] = lbl
+
+    def update(self, cls_idx: int, probs: list, counts: dict = None,
+               temporal_probs: list = None, prior: list = None,
+               fused_probs: list = None):
         cls_name = CLASSES[cls_idx]
         color    = _CLS_COLOR[cls_idx]
         conf     = probs[cls_idx]
@@ -133,6 +154,23 @@ class ClassPanel(ctk.CTkFrame):
                     text_color=_CLS_COLOR[CLASSES.index(cls)] if n > 0 else '#444444',
                 )
 
+        # Fusion detail rows
+        def _fmt(p: list | None) -> str:
+            if p is None:
+                return 'warming up…'
+            parts = [f'{CLASSES[i][0]} {p[i]*100:.0f}%' for i in range(len(CLASSES))]
+            return '  '.join(parts)
+
+        if temporal_probs is not None:
+            self._fusion_rows['Temporal'].configure(
+                text=f'Temporal: {_fmt(temporal_probs)}', text_color='#666666')
+            self._fusion_rows['OD Prior'].configure(
+                text=f'OD Prior: {_fmt(prior)}',
+                text_color='#888888' if prior is not None else '#444444')
+            self._fusion_rows['Fused'].configure(
+                text=f'Fused:    {_fmt(fused_probs)}',
+                text_color='#aaaaaa' if fused_probs is not None else '#444444')
+
     def set_elapsed(self, text: str):
         self._elapsed_lbl.configure(text=text)
 
@@ -144,6 +182,8 @@ class ClassPanel(ctk.CTkFrame):
             self._pct_lbls[cls].configure(text='0%')
             self._count_lbls[cls].configure(text='0 windows', text_color='#444444')
         self._elapsed_lbl.configure(text='—')
+        for row_name, lbl in self._fusion_rows.items():
+            lbl.configure(text=f'{row_name}: —', text_color='#444444')
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -169,6 +209,9 @@ class DriveGuardApp(ctk.CTk):
         self._cls_idx        = None
         self._initialized    = False
         self._window_counts  = {cls: 0 for cls in CLASSES}
+        self._temporal_probs: list | None = None
+        self._prior:          list | None = None
+        self._fused_probs:    list | None = None
 
         # Session timing (main-thread only)
         self._session_start: float | None = None
@@ -361,11 +404,18 @@ class DriveGuardApp(ctk.CTk):
         with self._lock:
             self._frame = bgr
 
-    def _stash_pred(self, cls_idx: int, probs, initialized: bool):
+    def _stash_pred(self, cls_idx: int, temporal_probs, prior, fused_probs, initialized: bool):
+        def _to_list(t):
+            if t is None:
+                return None
+            return t.tolist() if hasattr(t, 'tolist') else list(t)
         with self._lock:
-            self._cls_idx     = cls_idx
-            self._probs       = probs.tolist() if hasattr(probs, 'tolist') else list(probs)
-            self._initialized = initialized
+            self._cls_idx        = cls_idx
+            self._probs          = _to_list(fused_probs if fused_probs is not None else temporal_probs)
+            self._temporal_probs = _to_list(temporal_probs)
+            self._prior          = _to_list(prior)
+            self._fused_probs    = _to_list(fused_probs)
+            self._initialized    = initialized
             if initialized:
                 self._window_counts[CLASSES[cls_idx]] += 1
 
@@ -377,16 +427,22 @@ class DriveGuardApp(ctk.CTk):
 
     def _poll(self):
         with self._lock:
-            frame  = self._frame
-            probs  = self._probs
-            ci     = self._cls_idx
-            init   = self._initialized
-            counts = dict(self._window_counts)
+            frame         = self._frame
+            probs         = self._probs
+            ci            = self._cls_idx
+            init          = self._initialized
+            counts        = dict(self._window_counts)
+            temporal_probs = self._temporal_probs
+            prior          = self._prior
+            fused_probs    = self._fused_probs
 
         if frame is not None:
             self._render_video(frame)
         if probs is not None and init:
-            self._panel.update(ci, probs, counts)
+            self._panel.update(ci, probs, counts,
+                               temporal_probs=temporal_probs,
+                               prior=prior,
+                               fused_probs=fused_probs)
 
         if self._session_start is not None:
             elapsed = time.monotonic() - self._session_start
