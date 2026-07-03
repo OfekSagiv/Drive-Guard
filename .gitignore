@@ -6,6 +6,7 @@ DriveGuard_Features/
 ViT_Features/
 *.pth
 *.pt
+*.ts
 *.zip
 __pycache__/
 *.pyc
@@ -13,15 +14,23 @@ __pycache__/
 *.nosync
 *.mp4
 CLAUDE.md
+DriveGuard/.env
 
 ir_object_detection/sampled_frames/
+ir_object_detection/sampled_frames_roi/
 ir_object_detection/raw_predictions/
 ir_object_detection/refined/
 ir_object_detection/dataset/
 ir_object_detection/gold/
+ir_object_detection/gold_eval/
 ir_object_detection/viz/
+ir_object_detection/opus_review/
+ir_object_detection/opus_review_enhanced/
 
 # vit_transformer evaluation artifacts (generated; evaluate_infer.py stays tracked)
 pipelines/vit_transformer/eval_infer_*.log
 pipelines/vit_transformer/eval_infer_*.txt
 pipelines/vit_transformer/confusion_infer_eval.png
+ir_object_detection/rgb_transfer/
+
+docs/
