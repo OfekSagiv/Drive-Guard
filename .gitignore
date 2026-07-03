@@ -6,6 +6,7 @@ DriveGuard_Features/
 ViT_Features/
 *.pth
 *.pt
+*.ts
 *.zip
 __pycache__/
 *.pyc
