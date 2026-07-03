@@ -1,0 +1,14 @@
+#!/usr/bin/python3
+# DriveGuard launcher.
+# Location: <repo>/DriveGuard/DriveGuard.app/Contents/MacOS/DriveGuard
+# ROOT is 4 levels up from this file's directory (MacOS/).
+import os
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent   # .../MacOS
+ROOT = HERE.parents[3]                   # repo root
+
+venv_python = ROOT / '.venv' / 'bin' / 'python'
+script      = ROOT / 'DriveGuard' / 'app_ir_gui.py'
+
+os.execv(str(venv_python), [str(venv_python), str(script)])
