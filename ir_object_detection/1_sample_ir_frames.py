@@ -22,9 +22,13 @@ take the whole `drinking` pool and report cup's true count after detection.
 
 Frozen dataset
 --------------
-The manifest IS the dataset definition; commit it and re-extract identical frames:
-  python 1_sample_ir_frames.py --freeze-to manifest_balanced.csv --no-extract   # build the spec
-  python 1_sample_ir_frames.py --frozen manifest_balanced.csv                    # reproduce frames
+The manifest IS the dataset definition; it builds the spec, then extract_roi_variant.py
+cuts the ROI crops from it. The current frozen set is the co-driver one:
+  python 1_sample_ir_frames.py --camera a_column_co_driver --per-class 800 --safe 200 \
+      --freeze-to manifest_codriver_roi.csv --no-extract     # (re)build the frozen spec
+  python extract_roi_variant.py                              # extract ROI crops from it
+Note: this script's own --frozen extractor writes FULL frames; for the co-driver ROI
+dataset use extract_roi_variant.py instead (keypoint ROI crops).
 """
 
 import argparse
@@ -39,10 +43,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as C  # noqa: E402
 
 
-def _load_rows():
-    """Collect every CSV row whose activity is in our taxonomy, tagged with obj_class."""
+def _load_rows(cameras=None):
+    """Collect every CSV row whose activity is in our taxonomy, tagged with obj_class.
+
+    `cameras` restricts the source cameras (default: all in CAMERA_MAPPING)."""
     rows = []
-    for cam in C.CAMERA_MAPPING:
+    for cam in (cameras or C.CAMERA_MAPPING):
         for split in C.SPLITS:
             csv_path = os.path.join(
                 C.DATA_ROOT, "activities_3s", cam,
@@ -75,19 +81,13 @@ def _take(pool, n, seed):
 def _select_class_aware(df, per_class, safe_count, seed):
     """Class-aware selection. Returns (selected_df, report dict)."""
     parts, report = [], {}
-    # known-class targets (sample up to per_class each)
-    for cls in ["phone", "bottle", "food"]:
+    # known-class targets (sample up to per_class each). `drink` folds the bottle +
+    # drinking activities together (bottle/cup were merged into one drink class).
+    for cls in C.CLASSES:  # phone, drink, food
         pool = df[df["obj_class"] == cls]
         sel = _take(pool, per_class, seed)
         parts.append(sel)
         report[cls] = {"selected": len(sel), "available": len(pool), "target": per_class}
-    # bottle_or_cup: take ALL drinking frames to maximize cup yield at detection
-    bc = df[df["obj_class"] == "bottle_or_cup"]
-    parts.append(bc)
-    report["bottle_or_cup (drinking pool)"] = {
-        "selected": len(bc), "available": len(bc),
-        "note": "cup count is detection-limited; cup ceiling <= this, reported after Stage 3",
-    }
     # small controlled negative pool
     safe = df[df["obj_class"] == "safe"]
     s = _take(safe, safe_count, seed)
@@ -180,6 +180,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--per-class", type=int, default=C.PER_CLASS_TARGET, help="target frames per object class")
     ap.add_argument("--safe", type=int, default=C.SAFE_COUNT, help="number of Safe negative frames")
+    ap.add_argument("--camera", action="append", choices=list(C.CAMERA_MAPPING),
+                    help="restrict to one or more cameras (repeatable); default: all cameras")
     ap.add_argument("--seed", type=int, default=C.RANDOM_SEED)
     ap.add_argument("--frozen", metavar="MANIFEST", help="re-extract exact frames from a committed manifest")
     ap.add_argument("--freeze-to", metavar="PATH", help="also write the manifest to PATH (committable frozen spec)")
@@ -190,7 +192,7 @@ def main():
         manifest = pd.read_csv(args.frozen)
         print(f"Frozen mode: {len(manifest)} frames from {args.frozen}")
     else:
-        df = _load_rows().drop_duplicates(
+        df = _load_rows(args.camera).drop_duplicates(
             subset=["camera", "file_id", "annotation_id", "chunk_id"])  # 1 frame / chunk
         sel, report = _select_class_aware(df, args.per_class, args.safe, args.seed)
         sel["split"] = _assign_splits(sel, C.SPLIT_RATIOS, args.seed)
