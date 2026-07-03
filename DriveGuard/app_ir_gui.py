@@ -134,7 +134,14 @@ class ClassPanel(ctk.CTkFrame):
 
     def update(self, cls_idx: int, probs: list, counts: dict = None,
                temporal_probs: list = None, prior: list = None,
-               fused_probs: list = None):
+               fused_probs: list = None, initialized: bool = True):
+        # During init phase only update fusion rows to show "warming up…"
+        if not initialized:
+            for row_name in ('Temporal', 'OD Prior', 'Fused'):
+                self._fusion_rows[row_name].configure(
+                    text=f'{row_name}: warming up…', text_color='#444444')
+            return
+
         cls_name = CLASSES[cls_idx]
         color    = _CLS_COLOR[cls_idx]
         conf     = probs[cls_idx]
@@ -157,7 +164,7 @@ class ClassPanel(ctk.CTkFrame):
         # Fusion detail rows
         def _fmt(p: list | None) -> str:
             if p is None:
-                return 'warming up…'
+                return '—'
             parts = [f'{CLASSES[i][0]} {p[i]*100:.0f}%' for i in range(len(CLASSES))]
             return '  '.join(parts)
 
@@ -438,11 +445,12 @@ class DriveGuardApp(ctk.CTk):
 
         if frame is not None:
             self._render_video(frame)
-        if probs is not None and init:
+        if probs is not None:
             self._panel.update(ci, probs, counts,
                                temporal_probs=temporal_probs,
                                prior=prior,
-                               fused_probs=fused_probs)
+                               fused_probs=fused_probs,
+                               initialized=init)
 
         if self._session_start is not None:
             elapsed = time.monotonic() - self._session_start
