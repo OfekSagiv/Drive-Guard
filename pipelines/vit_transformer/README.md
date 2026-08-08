@@ -66,18 +66,44 @@ Spatial feature extraction using **ViT-SO400M-SigLIP** (1152-dim embeddings), fo
 
 ---
 
-### Step 4 — Evaluate end-to-end (`evaluate_pipeline_driveguard.ipynb`)
+### Step 4 — Evaluate end-to-end (`evaluate_pipeline_driveguard.ipynb`) — [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1xpjUvB4hrzQgttQW9XVTSg0EcmxJfqNX)
 
-**Input:**
-- `MyDrive/DriveGuard/models/vit_spatial_model_v1.pth`
-- `MyDrive/DriveGuard/models/temporal_head_model.pth`
-- `ds_driveguard_temporal_roi/` zip
+Runs the **full two-stage pipeline** on the test set with **no cached `.npy` features** — the ViT
+encodes the raw JPEG frames live, exactly as `infer.py` does. This is the honest end-to-end number;
+Step 3's test metrics are computed from pre-extracted features and so do not exercise the spatial
+model at evaluation time.
 
-- Runs full two-stage pipeline on test set (no cached features)
-- Batch: 16 clips → 256 ViT forward passes, then temporal inference
-- AMP: bfloat16 on A100, float16 on V100
+**Input** (all paths as hardcoded in Cell 2 — these are *not* under `models/`):
+- `MyDrive/DriveGuard/best_model_fused_internViT.pth` — spatial weights (1.6 GB)
+- `MyDrive/DriveGuard/stage4_single_cam/best_stage4_single_cam_model.pth` — temporal weights (~53 MB)
+- `MyDrive/DriveGuard/stage4_single_cam/cfg_stage4_single_cam.json` — temporal architecture cfg,
+  loaded so the model definition always matches the checkpoint
+- `MyDrive/DriveGuard/ds_driveguard_16frames_roi.nosync.zip` — 16-frame clip dataset (~28 GB;
+  copied to local disk and extracted, since Drive FUSE is slow for files this size)
 
-**Output:** Classification report (precision/recall/F1 per class), confusion matrix PNG
+**Run details:**
+- Filters to a single camera (`CFG['camera'] = 'a_column_co_driver'`) → 782 test sequences
+  (311 Drink / 148 Phone / 323 Safe), 49 batches
+- Batch: 16 clips → 256 ViT forward passes per step, then temporal inference (drop to 8 if OOM)
+- Spatial 428.2 M params + temporal 13.2 M params, both under `torch.compile`
+- AMP: bfloat16 on A100, float16 on V100; `noise_std` forced to 0.0 at eval (training used 0.075)
+
+**Output:** classification report + confusion matrix PNG, written to
+`MyDrive/DriveGuard/eval_pipeline/` (`classification_report_e2e.txt`, `confusion_matrix_e2e.png`).
+
+**Measured result** (A100-40GB run):
+
+| Class | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| Drink | 0.99 | 0.93 | 0.96 | 311 |
+| Phone | 0.88 | 0.86 | 0.87 | 148 |
+| Safe | 0.93 | 0.99 | 0.96 | 323 |
+| **Accuracy** | | | **0.9425** | 782 |
+| **Macro F1** | | | **0.9301** | 782 |
+
+Overall accuracy and Macro F1 land within a point of the cached-feature evaluation in Step 3
+(0.94 / 0.93), but the per-class balance shifts: end-to-end trades Phone precision (0.98 → 0.88)
+for Phone recall (0.82 → 0.86), and improves Safe precision (0.88 → 0.93).
 
 ---
 
