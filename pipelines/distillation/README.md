@@ -7,22 +7,21 @@ It trains a **Video Swin3D student model** directly on 16-frame ROI clips and in
 - Test confusion-matrix evaluation
 - Random test-sequence prediction visualization
 
---- 
+---
 
 ## Run Order
 
-### Step 1 - Extract 16-frame ROI dataset
+### Prerequisites
+- Raw videos + `activities_3s/<camera>/midlevel.chunks_90.split_0.{train,val,test}.csv` available locally
+- Runs locally (CPU/MPS/CUDA auto-detected) — no Colab/Google Drive dependency
 
-Script: `temporal_extract_all_cams_16frames_roi.py`
+---
 
-```bash
-python temporal_extract_all_cams_16frames_roi.py \
-  --data_root . \
-  --data_dirs data "data 2" "data 3" "data 4" "data 5" "data 6" \
-  --output_base ds_driveguard_16frames_roi.nosync
-```
+### Step 1 - Extract 16-frame ROI dataset (`temporal_extract_all_cams_16frames_roi.ipynb`)
 
-Expected structure under `data_root`:
+Edit the config cell (`DATA_ROOT`, `DATA_DIR_NAMES`, `OUTPUT_BASE`), then run all cells.
+
+Expected structure under `DATA_ROOT`:
 - `activities_3s/<camera>/midlevel.chunks_90.split_0.{train,val,test}.csv`
 - Video files inside one or more data folders (`data`, `data 2`, ...)
 
@@ -31,18 +30,9 @@ Output:
 
 ---
 
-### Step 2 - Train student model
+### Step 2 - Train student model (`train_model.ipynb`)
 
-Script: `train_model.py`
-
-```bash
-python train_model.py \
-  --data_root ds_driveguard_16frames_roi.nosync \
-  --output_dir checkpoints \
-  --epochs 10 \
-  --batch_size 2 \
-  --pretrained
-```
+Edit the `cfg` dict (`data_root`, `output_dir`, `epochs`, `batch_size`, `pretrained`, optional `enable_distillation` + `teacher_checkpoint`), then run all cells.
 
 Outputs:
 - `checkpoints/best_swin3d_driveguard.pt`
@@ -50,15 +40,9 @@ Outputs:
 
 ---
 
-### Step 3 - Evaluate on test set
+### Step 3 - Evaluate on test set (`evaluate_confusion.ipynb`)
 
-Script: `evaluate_confusion.py`
-
-```bash
-python evaluate_confusion.py \
-  --data_root ds_driveguard_16frames_roi.nosync \
-  --checkpoint checkpoints/best_swin3d_driveguard.pt
-```
+Edit the `cfg` dict (`data_root`, `checkpoint`), then run all cells.
 
 Output:
 - Printed confusion matrix and accuracy
@@ -66,12 +50,14 @@ Output:
 
 ---
 
-### Step 4 - Predict one random test clip
+### Step 4 - Predict one random test clip (`predict.ipynb` / `infer.py`)
 
-Script: `predict.py`
+Notebook: edit the `cfg` dict (`data_root`, `checkpoint`), then run all cells.
+
+Or run locally as a script:
 
 ```bash
-python predict.py \
+python infer.py \
   --data_root ds_driveguard_16frames_roi.nosync \
   --checkpoint checkpoints/best_swin3d_driveguard.pt
 ```
